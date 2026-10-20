@@ -1,0 +1,4 @@
+# Données de marché CME (licence Databento) : ne pas versionner
+data/
+__pycache__/
+.pytest_cache/
