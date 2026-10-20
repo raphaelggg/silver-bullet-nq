@@ -20,6 +20,8 @@ from silver_bullet.metrics import summarize, by_period
 from silver_bullet.strategy import Params, backtest
 
 OUT = Path(__file__).resolve().parent / "results"
+PLOTTED = ("base", "bias_prev_day", "bias_sma20", "bias_midnight", "shorts", "longs",
+           "shorts_bias_prev_day", "shorts_bias_sma20", "shorts_bias_midnight")
 
 BASE = Params()
 VARIANTS = {
@@ -32,6 +34,16 @@ VARIANTS = {
     "pm": replace(BASE, windows=("pm",)),
     "london": replace(BASE, windows=("london",)),
     "all_windows": replace(BASE, windows=("london", "am", "pm")),
+    "bias_prev_day": replace(BASE, bias="prev_day"),
+    "bias_sma20": replace(BASE, bias="sma20"),
+    "bias_midnight": replace(BASE, bias="midnight"),
+    "shorts": replace(BASE, direction="short"),
+    "longs": replace(BASE, direction="long"),
+    "shorts_pm": replace(BASE, direction="short", windows=("pm",)),
+    "shorts_all_windows": replace(BASE, direction="short", windows=("london", "am", "pm")),
+    "shorts_bias_prev_day": replace(BASE, direction="short", bias="prev_day"),
+    "shorts_bias_sma20": replace(BASE, direction="short", bias="sma20"),
+    "shorts_bias_midnight": replace(BASE, direction="short", bias="midnight"),
 }
 
 
@@ -39,12 +51,14 @@ def fmt_summary(rows: dict[str, dict]) -> str:
     df = pd.DataFrame(rows).T
     cols = ["trades", "win_rate", "avg_r", "total_r", "profit_factor", "max_dd_r",
             "sharpe_daily_r", "total_usd_1ct", "avg_risk_pts", "pct_target", "pct_stop", "pct_time"]
-    df = df[cols]
+    years = sorted(c for c in df.columns if c.startswith("r_"))
+    df = df[cols + years]
     fmts = {"trades": "{:.0f}", "win_rate": "{:.1%}", "avg_r": "{:+.3f}", "total_r": "{:+.1f}",
             "profit_factor": "{:.2f}", "max_dd_r": "{:.1f}", "sharpe_daily_r": "{:.2f}",
             "total_usd_1ct": "{:+,.0f}", "avg_risk_pts": "{:.1f}", "pct_target": "{:.0%}",
             "pct_stop": "{:.0%}", "pct_time": "{:.0%}"}
     out = df.copy().astype(object)
+    fmts.update({y: "{:+.1f}" for y in years})
     for c, f in fmts.items():
         out[c] = df[c].map(lambda v, f=f: f.format(v))
     return out.to_markdown()
@@ -67,6 +81,9 @@ def main() -> None:
         trades = backtest(bars, p)
         trades.to_csv(OUT / f"trades_{name}.csv", index=False)
         summaries[f"{name} ({p.label()})"] = summarize(trades)
+        if not trades.empty:
+            by_year = trades.groupby(pd.to_datetime(trades["date"]).dt.year)["pnl_r"].sum()
+            summaries[f"{name} ({p.label()})"].update({f"r_{y}": v for y, v in by_year.items()})
         if not trades.empty:
             curves[name] = trades.set_index("exit_time")["pnl_r"].cumsum()
 
@@ -93,10 +110,11 @@ def main() -> None:
 
     fig, ax = plt.subplots(figsize=(11, 5.5))
     for name, s in curves.items():
-        ax.plot(s.index, s.values, label=name, lw=1.6 if name == "base" else 1.0)
+        if name in PLOTTED:
+            ax.plot(s.index, s.values, label=name, lw=1.6 if name == "base" else 1.0)
     ax.axhline(0, color="grey", lw=0.6)
     ax.set_ylabel("R cumulés")
-    ax.set_title("Silver Bullet NQ — courbes d'equity (R)")
+    ax.set_title("Silver Bullet NQ (10h-11h) — biais journalier et sens, courbes d'equity (R)")
     ax.legend(fontsize=8, ncol=3)
     fig.tight_layout()
     fig.savefig(OUT / "equity_r.png", dpi=120)

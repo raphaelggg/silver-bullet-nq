@@ -12,6 +12,9 @@ Règles (par fenêtre horaire, heure de New York) :
   4. L'ordre doit être exécuté avant la fin de la fenêtre ; il est annulé si l'objectif est
      touché avant l'exécution. Une seule position par fenêtre.
   5. Sortie au stop, à l'objectif, ou à la clôture de la dernière barre avant `flat_time`.
+  6. Filtres de sens optionnels : `direction` ("long"/"short") et `bias`, qui n'autorise que
+     les FVG dans le sens du biais journalier (voir `daily_bias`). Un FVG à contre-biais est
+     ignoré et on attend le suivant dans la fenêtre.
 
 Hypothèses conservatrices sur l'ordre intra-barre : si stop et objectif sont touchés dans la
 même barre, c'est le stop ; sur la barre d'exécution, seul le stop est vérifié.
@@ -42,6 +45,8 @@ class Params:
     rr: float = 2.0
     min_rr: float = 1.0  # pour target="liquidity" : objectif refusé s'il paie moins
     require_sweep: bool = False
+    direction: str = "both"  # "both", "long" ou "short"
+    bias: str | None = None  # None, "prev_day", "sma20" ou "midnight"
     sweep_lookback_min: int = 60
     min_gap_pts: float = 1.0
     min_risk_pts: float = 5.0
@@ -54,6 +59,10 @@ class Params:
         parts.append(f"tgt={self.rr}R" if self.target == "rr" else "tgt=liq")
         if self.require_sweep:
             parts.append(f"sweep{self.sweep_lookback_min}m")
+        if self.direction != "both":
+            parts.append(f"{self.direction}s")
+        if self.bias:
+            parts.append(f"bias={self.bias}")
         return " ".join(parts)
 
 
@@ -83,7 +92,37 @@ class Trade:
         return self
 
 
-def _find_trade(day: pd.DataFrame, d, name: str, p: Params) -> Trade | None:
+def back_adjusted_close(bars: pd.DataFrame) -> pd.Series:
+    """Clôtures recollées aux rolls (méthode additive) : les sauts de contrat disparaissent."""
+    roll = bars["instrument_id"].ne(bars["instrument_id"].shift())
+    roll.iloc[0] = False
+    gap = (bars["open"] - bars["close"].shift()).where(roll, 0.0)
+    # Chaque roll décale tout l'historique antérieur du montant du saut.
+    offset = gap[::-1].cumsum()[::-1].shift(-1, fill_value=0.0)
+    return bars["close"] + offset
+
+
+def daily_bias(bars: pd.DataFrame, mode: str) -> dict:
+    """Biais par date (+1 haussier, -1 baissier), calculé uniquement avec la veille.
+
+    prev_day : sens de la bougie RTH (09:30-16:00) de la veille.
+    sma20    : clôture RTH de la veille au-dessus / en dessous de sa moyenne 20 jours.
+    """
+    adj = back_adjusted_close(bars)
+    t = bars.index.time
+    rth = adj[(t >= time(9, 30)) & (t < time(16, 0))]
+    g = rth.groupby(rth.index.date)
+    daily = pd.DataFrame({"open": g.first(), "close": g.last()})
+    if mode == "prev_day":
+        sig = np.sign(daily["close"] - daily["open"])
+    elif mode == "sma20":
+        sig = np.sign(daily["close"] - daily["close"].rolling(20).mean())
+    else:
+        raise ValueError(mode)
+    return sig.shift(1).dropna().astype(int).to_dict()  # valeur de la veille, pour le jour J
+
+
+def _find_trade(day: pd.DataFrame, d, name: str, p: Params, bias_dir: int | None = None) -> Trade | None:
     start_t, end_t, flat_t = WINDOWS[name]
     tz = day.index.tz
     ws = pd.Timestamp(datetime.combine(d, start_t), tz=tz)
@@ -105,6 +144,17 @@ def _find_trade(day: pd.DataFrame, d, name: str, p: Params) -> Trade | None:
             return None
         ref_hi, ref_lo = h[ref].max(), l[ref].min()
 
+    allowed = {"both": (1, -1), "long": (1,), "short": (-1,)}[p.direction]
+    if p.bias == "midnight":
+        # Au-dessus de l'ouverture de minuit juste avant la fenêtre -> haussier.
+        if w0 == 0 or ts[0].time() != time(0, 0):
+            return None
+        bias_dir = int(np.sign(c[w0 - 1] - o[0]))
+    if p.bias:
+        allowed = tuple(x for x in allowed if x == bias_dir)
+    if not allowed:
+        return None
+
     slip = p.slippage_ticks * TICK
     i = w0 + 2
     while i <= w1:
@@ -120,7 +170,7 @@ def _find_trade(day: pd.DataFrame, d, name: str, p: Params) -> Trade | None:
             direction = -1
             gap_lo, gap_hi = h[i], l[i - 2]
             stop = h[i - 2] + p.stop_buffer_pts
-        if direction == 0:
+        if direction not in allowed:
             i += 1
             continue
 
@@ -203,12 +253,13 @@ def _find_trade(day: pd.DataFrame, d, name: str, p: Params) -> Trade | None:
 def backtest(bars: pd.DataFrame, p: Params) -> pd.DataFrame:
     """Lance la stratégie sur toutes les journées ; renvoie un DataFrame de trades."""
     trades = []
+    bias = daily_bias(bars, p.bias) if p.bias in ("prev_day", "sma20") else {}
     dates = bars.index.date
     for d, day in bars.groupby(dates, sort=True):
         if pd.Timestamp(d).weekday() >= 5:
             continue
         for name in p.windows:
-            t = _find_trade(day, d, name, p)
+            t = _find_trade(day, d, name, p, bias.get(d))
             if t is not None:
                 trades.append(asdict(t))
     return pd.DataFrame(trades)

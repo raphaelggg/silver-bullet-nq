@@ -22,5 +22,16 @@ Résultats écrits dans `results/` : `report.md`, `equity_r.png`, `trades_<varia
 - Coûts : 4,50 $ A/R + 1 tick de slippage sur sorties stop/temps.
 - Intra-barre conservateur : stop prioritaire si stop et objectif dans la même barre.
 
+## Filtres optionnels
+
+- `direction` : `"both"` (défaut), `"long"` ou `"short"`.
+- `bias` (biais journalier, calculé sans regarder le futur) :
+  - `prev_day` : sens de la bougie RTH 09:30–16:00 de la veille ;
+  - `sma20` : clôture RTH de la veille au-dessus / en dessous de sa moyenne 20 jours,
+    sur une série recollée aux rolls de contrat ;
+  - `midnight` : prix juste avant la fenêtre au-dessus / en dessous de l'ouverture de minuit.
+
+  Un FVG à contre-biais est ignoré et on attend le suivant dans la fenêtre.
+
 Tous les paramètres sont dans `silver_bullet/strategy.py` (`Params`) ; les variantes testées
 sont dans `run_backtest.py` (`VARIANTS`).

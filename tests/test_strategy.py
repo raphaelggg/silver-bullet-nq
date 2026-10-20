@@ -52,3 +52,22 @@ def test_setup_cancelled_if_target_reached_before_fill():
     trades = backtest(make_bars(rows), Params(min_risk_pts=1, slippage_ticks=0, commission_rt=0))
     # Le premier setup (entrée 105) est annulé ; un FVG ultérieur peut encore être pris.
     assert (trades.empty or (trades["fvg_time"] > pd.Timestamp("2025-03-04 10:03", tz="America/New_York")).all())
+
+
+def test_direction_filter_skips_longs():
+    rows = flat_bars(60)
+    rows += [(100, 101, 95, 100), (100, 110, 100, 109), (109, 112, 105, 111)]
+    rows += [(111, 111, 104, 106), (106, 135, 106, 134)]
+    rows += flat_bars(10, 134)
+    p = Params(min_risk_pts=1, slippage_ticks=0, commission_rt=0, direction="short")
+    trades = backtest(make_bars(rows), p)
+    assert trades.empty or (trades["direction"] == -1).all()
+
+
+def test_back_adjusted_close_removes_roll_gap():
+    from silver_bullet.strategy import back_adjusted_close
+
+    bars = make_bars([(100, 101, 99, 100), (100, 101, 99, 100), (300, 301, 299, 300), (300, 301, 299, 301)])
+    bars.loc[bars.index[2]:, "instrument_id"] = 2
+    adj = back_adjusted_close(bars)
+    assert adj.tolist() == [300, 300, 300, 301]
